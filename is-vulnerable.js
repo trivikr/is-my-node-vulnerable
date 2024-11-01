@@ -1,13 +1,10 @@
 const { danger, allGood, bold, vulnerableWarning, separator } = require('./ascii')
-const { request, stream, setGlobalDispatcher, Agent } = require('undici')
-const EE = require('events')
 const fs = require('fs')
 const path = require('path')
 const debug = require('debug')('is-my-node-vulnerable')
 const satisfies = require('semver/functions/satisfies')
 const nv = require('@pkgjs/nv')
-
-setGlobalDispatcher(new Agent({ connections: 20 }))
+const { pipeline } = require('stream/promises')
 
 const CORE_RAW_URL = 'https://raw.githubusercontent.com/nodejs/security-wg/main/vuln/core/index.json'
 
@@ -33,21 +30,28 @@ function updateLastETag (etag) {
 }
 
 async function fetchCoreIndex () {
-  const abortRequest = new EE()
-  await stream(CORE_RAW_URL, { signal: abortRequest }, ({ statusCode }) => {
-    if (statusCode !== 200) {
-      console.error('Request to Github failed. Aborting...')
-      abortRequest.emit('abort')
+  try {
+    const response = await fetch(CORE_RAW_URL)
+
+    if (!response.ok) {
+      console.error(`Request to Github failed with status ${response.status}. Aborting...`)
       process.nextTick(() => { process.exit(1) })
     }
-    return fs.createWriteStream(coreLocalFile, { flags: 'w', autoClose: true })
-  })
+
+    const data = await response.json()
+    const fileStream = fs.createWriteStream(coreLocalFile)
+    await pipeline(data, fileStream)
+  } catch (error) {
+    console.error(`Request to Github failed with "${error.message}". Aborting...`)
+    process.nextTick(() => { process.exit(1) })
+  }
+
   return readLocal(coreLocalFile)
 }
 
 async function getCoreIndex () {
-  const { headers } = await request(CORE_RAW_URL, { method: 'HEAD' })
-  if (!lastETagValue || lastETagValue !== headers.etag || !fs.existsSync(coreLocalFile)) {
+  const { headers } = await fetch(CORE_RAW_URL, { method: 'HEAD' })
+  if (!lastETagValue || lastETagValue !== headers.get('etag') || !fs.existsSync(coreLocalFile)) {
     updateLastETag(headers.etag)
     debug('Creating local core.json')
     return fetchCoreIndex()
